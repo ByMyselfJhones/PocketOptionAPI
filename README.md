@@ -147,12 +147,11 @@ Este projeto é uma implementação não oficial e não possui vínculo com a Po
 
 ## 📞 Suporte
 
-- 📧 Email: [bymyselfjhones@gmail.com](mailto:bymyselfjhones@gmail.com)
-- 💬 Telegram: [@traderjhonesofc](https://t.me/traderjhonesofc)
-- 🌐 Website: [ByMyselfJhones.site](https://github.com/ByMyselfJhones)
+- 💬 Telegram: [Trader Jhones](https://t.me/traderjhonesofc)
+- 🌐 Website: [ByMyselfJhones](https://github.com/ByMyselfJhones)
 
 ---
 
 <p align="center">
   Desenvolvido com ❤️ por <a href="https://github.com/ByMyselfJhones">ByMyselfJhones</a>
-</p> 
+</p>
