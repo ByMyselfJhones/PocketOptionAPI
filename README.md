@@ -19,12 +19,12 @@
 
 ## 🛠️ Instalação
 
-### Via pip (recomendado):
+### Via pip (Recomendado):
 ```bash
 pip install git+https://github.com/ByMyselfJhones/pocketoptionapi.git
 ```
 
-### Para desenvolvimento:
+### Para Desenvolvimento:
 ```bash
 git clone https://github.com/ByMyselfJhones/pocketoptionapi.git
 cd pocketoptionapi
