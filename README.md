@@ -3,7 +3,7 @@
 [![GitHub](https://img.shields.io/badge/GitHub-ByMyselfJhones-blue?style=flat-square&logo=github)](https://github.com/ByMyselfJhones)
 [![Telegram](https://img.shields.io/badge/Telegram-@traderjhonesofc-blue?style=flat-square&logo=telegram)](https://t.me/traderjhonesofc)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
-[![Python Version](https://img.shields.io/badge/Python-3.8%2B-blue?style=flat-square)](https://www.python.org)
+[![Python Version](https://img.shields.io/badge/Python-3.12.7-blue?style=flat-square)](https://www.python.org)
 
 > Uma API Python robusta e moderna para integração com a PocketOption, oferecendo uma interface limpa e eficiente para Automação de Operações.
 
