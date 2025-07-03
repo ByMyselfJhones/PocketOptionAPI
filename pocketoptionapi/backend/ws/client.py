@@ -22,7 +22,7 @@ class WebSocketClient:
                     url,
                     extra_headers={
                         # "Origin": "https://pocket-link19.co",
-                        "Origin": "https://po.trade/"
+                        "Origin": "https://pocketoption.com/"
                     },
                 ) as websocket:
                     async for message in websocket:

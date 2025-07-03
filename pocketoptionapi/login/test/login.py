@@ -23,7 +23,7 @@ import time
 def GetSSID(email, password):
     driver = webdriver.Chrome(ChromeDriverManager().install())
     solver = RecaptchaSolver(driver=driver)
-    driver.get("https://po.trade/login")  # https://po.trade/login
+    driver.get("https://pocketoption.com/login")  # https://pocketoption.com/login
     driver.set_window_size(550, 691)
     driver.find_element(By.NAME, "email").click()
     driver.find_element(By.NAME, "email").send_keys(email)  # email@mail.com
@@ -42,8 +42,8 @@ def GetSSID(email, password):
     )
     # For demo:
     driver.get(
-        "https://po.trade/cabinet/demo-quick-high-low/"
-    )  # https://po.trade/cabinet/demo-quick-high-low/
+        "https://pocketoption.com/cabinet/demo-quick-high-low/"
+    )  # https://pocketoption.com/cabinet/demo-quick-high-low/
     WebDriverWait(driver, 30).until(
         expected_conditions.presence_of_element_located((By.CSS_SELECTOR, ".layer"))
     )
