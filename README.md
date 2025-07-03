@@ -20,6 +20,11 @@
 
 ## 🛠️ Instalação
 
+> **Nota**: Recomenda-se atualizar o `pip` antes de instalar as dependências para garantir compatibilidade:
+> ```bash
+> python -m pip install --upgrade pip
+> ```
+
 ### Via pip (Recomendado):
 ```bash
 pip install git+https://github.com/ByMyselfJhones/PocketOptionAPI.git
