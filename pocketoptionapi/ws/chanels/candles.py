@@ -34,7 +34,7 @@ class GetCandles(Base):
         :param count: The number of candles you want to have
         """
 
-        #      {"asset": "AUDNZD_otc", "index": 171201484810, "time": 1712002800, "offset": 9000, "period": 60}]
+        #      {"asset": "AUDNZD_OTC", "index": 171201484810, "time": 1712002800, "offset": 9000, "period": 60}]
         data = {
             "asset": str(active_id),
             "index": end_time,

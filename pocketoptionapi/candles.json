@@ -1,14 +1,14 @@
 {
   "metadata": {
     "autor": "ByMyselfJhones",
-    "funcao": "Dados de cotação do ativo AUDNZD_otc",
+    "funcao": "Dados de cotação do ativo AUDNZD_OTC",
     "descricao": [
       "Armazena cotações de preço (abertura, fechamento, máximo, mínimo)",
       "Inclui timestamp, período (1 minuto) e identificador do ativo",
       "Usado para análise ou processamento de dados financeiros"
     ]
   },
-  "asset": "AUDNZD_otc",
+  "asset": "AUDNZD_OTC",
   "index": 171201484810,
   "data": [
     {
@@ -18,7 +18,7 @@
       "close": 1.08553,
       "high": 1.08586,
       "low": 1.08475,
-      "asset": "AUDNZD_otc"
+      "asset": "AUDNZD_OTC"
     }
   ],
   "period": 60

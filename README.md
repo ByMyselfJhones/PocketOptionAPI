@@ -58,8 +58,8 @@ print(f"💰 Saldo: ${saldo:.2f}")
 # Realizar operação
 resultado = api.buy(
     price=10,           # Valor em $
-    asset="EURUSD_otc", # Par de moedas (note o sufixo _otc)
-    direction="call",   # "call" (Alta) ou "put" (Baixa)
+    asset="EURUSD_OTC", # Par de moedas (note o sufixo _OTC)
+    direction="CALL",   # "CALL" (Alta) ou "PUT" (Baixa)
     duration=1          # Expiração em minutos
 )
 
@@ -86,7 +86,7 @@ def trade_handler(result):
 ```python
 # Obter histórico de candles
 candles = api.get_candles(
-    asset="EURUSD_otc",  # Note o sufixo _otc para ativos OTC
+    asset="EURUSD_OTC",  # Note o sufixo _OTC para ativos OTC
     interval=60,         # Intervalo em segundos
     count=100           # Quantidade de candles
 )

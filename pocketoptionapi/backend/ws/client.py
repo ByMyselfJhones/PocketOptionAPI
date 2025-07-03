@@ -46,7 +46,7 @@ class WebSocketClient:
             print(message)
 
         # Code to make order
-        # data = r'42["openOrder",{"asset":"#AXP_otc","amount":1,"action":"call","isDemo":1,"requestId":14680035,"optionType":100,"time":20}]'
+        # data = r'42["openOrder",{"asset":"#AXP_OTC","amount":1,"action":"call","isDemo":1,"requestId":14680035,"optionType":100,"time":20}]'
         # await websocket.send(data)
 
         if message.startswith('0{"sid":"'):
