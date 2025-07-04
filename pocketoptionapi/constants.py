@@ -5,6 +5,7 @@
 # - Armazena URLs de servidores WebSocket em um dicionário
 # - Permite acesso às URLs como atributos
 # - Retorna URLs específicas (DEMO ou EUROPA) com base em parâmetro
+# - Adiciona método get_all() para retornar todas as regiões
 """
 
 import random
@@ -42,3 +43,7 @@ class REGION:
         if demo:
             return [self.REGIONS["DEMO"]]
         return [self.REGIONS["EUROPA"]]
+
+    def get_all(self):
+        """Retorna todas as URLs de regiões disponíveis."""
+        return list(self.REGIONS.values())
