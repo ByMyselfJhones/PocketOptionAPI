@@ -1,18 +1,23 @@
 """
 # Autor: ByMyselfJhones
-# Função: Canal WebSocket para envio de SSID na API Pocket Option
+# Função: Canal WebSocket para autenticação via SSID
 # Descrição:
-# - Envia identificador de sessão (SSID) via requisição WebSocket
+# - Envia SSID para autenticação na Pocket Option
 """
 
-from pocketoptionapi.ws.channels.base import Base
+import json
+import logging
 
+class SSIDChannel:
+    def __init__(self, client):
+        self.client = client
+        self.logger = logging.getLogger(__name__)
 
-class Ssid(Base):
-    """Class for Pocket Option API ssid websocket chanel."""
-    # pylint: disable=too-few-public-methods
-
-    name = "ssid"
-
-    def __call__(self, ssid):
-        self.send_websocket_request(self.name, ssid)
+    async def authenticate(self):
+        """Autentica usando SSID."""
+        message = {
+            "type": "auth",
+            "data": json.loads(self.client.ssid[2:])["auth"]
+        }
+        self.logger.info("Enviando autenticação SSID")
+        await self.client.send(message)
