@@ -40,29 +40,32 @@ pip install -e .
 ## 📖 Uso Básico
 
 ```python
-from pocketoptionapi.stable_api import PocketOption
+from pocketoptionapi.client import PocketOptionClient
+from pocketoptionapi.config import Config
 import logging
 
 # Configurar Logging (opcional)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Configuração da Sessão
-ssid = """42["auth",{"session":"sua_sessao_aqui","isDemo":1,"uid":seu_uid_aqui,"platform":2}]"""
-demo = True  # True para conta demo, False para conta real
+config = Config(
+    ssid='42["auth",{"session":"sua_sessao_aqui","isDemo":1,"uid":seu_uid_aqui,"platform":2}]',
+    is_demo=True  # True para conta demo, False para conta real
+)
 
-# Inicializar API
-api = PocketOption(ssid, demo)
+# Inicializar Cliente
+client = PocketOptionClient(config)
 
 # Conectar
-connect = api.connect()
-print(connect)
+client.connect()
+print("✅ Conectado!")
 
 # Consultar saldo
-saldo = api.get_balance()
+saldo = client.get_balance()
 print(f"💰 Saldo: ${saldo:.2f}")
 
 # Realizar operação
-resultado = api.buy(
+resultado = client.buy(
     price=10,           # Valor em $
     asset="EURUSD_OTC", # Par de moedas (note o sufixo _OTC)
     direction="CALL",   # "CALL" (Alta) ou "PUT" (Baixa)
@@ -151,6 +154,23 @@ Exemplo de formato de SSID:
 ```
 
 Se você não conseguir encontrá-lo, tente executar o script de extração automática de SSID na pasta `tools_ferramentas`.
+
+## 📂 Estrutura do Projeto
+
+```
+pocketoptionapi/
+├── client.py              # Cliente principal da API
+├── config.py              # Configurações da API
+├── connection_keep_alive.py # Manutenção de conexão
+├── connection_monitor.py  # Monitoramento de conexão
+├── constants.py           # Constantes da API
+├── exceptions.py          # Exceções personalizadas
+├── models.py              # Modelos de dados
+├── monitoring.py          # Ferramentas de monitoramento
+├── utils.py               # Funções utilitárias
+├── websocket_client.py    # Cliente WebSocket
+├── __init__.py            # Inicialização do pacote
+```
 
 ## 🤝 Contribuindo
 
