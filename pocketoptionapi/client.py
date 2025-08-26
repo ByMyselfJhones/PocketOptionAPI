@@ -182,7 +182,7 @@ class AsyncPocketOptionClient:
                 category=ErrorCategory.CONNECTION,
                 message=f"Falha na conexão: {e}",
             )
-            return False
+            return False, 'Falha ao conectar'
 
     async def _start_regular_connection(
         self, regions: Optional[List[str]] = None
@@ -240,13 +240,13 @@ class AsyncPocketOptionClient:
 
                     self._connection_stats["successful_connections"] += 1
                     logger.info("Conectado e autenticado com sucesso")
-                    return True
+                    return True, 'Conexão bem sucedida'
 
             except Exception as e:
                 logger.warning(f"Falha ao conectar à região {region}: {e}")
                 continue
 
-        return False
+        return False, 'Falha ao conectar'
 
     async def _start_persistent_connection(
         self, regions: Optional[List[str]] = None
@@ -299,10 +299,10 @@ class AsyncPocketOptionClient:
         if success:
             self._is_persistent = True
             logger.info(" Conexão persistente estabelecida com sucesso")
-            return True
+            return True, 'Conexão bem sucedida'
         else:
             logger.error("Falha ao estabelecer conexão persistente")
-            return False
+            return False, 'Falha ao conectar'
 
     async def _start_keep_alive_tasks(self):
         """Iniciar tarefas de keep-alive para conexão regular"""
@@ -338,7 +338,7 @@ class AsyncPocketOptionClient:
                 try:
                     success = await self._start_regular_connection()
                     if success:
-                        logger.info(" Reconexão bem-sucedida")
+                        logger.info(" Reconexão bem sucedida")
                     else:
                         logger.error("Falha na reconexão")
                         await asyncio.sleep(10)  # Aguardar antes da próxima tentativa
@@ -638,10 +638,10 @@ class AsyncPocketOptionClient:
                 return await self._keep_alive_manager.send_message(message)
             else:
                 await self._websocket.send_message(message)
-                return True
+                return True, 'Conexão bem sucedida'
         except Exception as e:
             logger.error(f"Falha ao enviar mensagem: {e}")
-            return False
+            return False, 'Falha ao conectar'
 
     def get_connection_stats(self) -> Dict[str, Any]:
         """Obter estatísticas completas de conexão"""
@@ -1124,7 +1124,7 @@ class AsyncPocketOptionClient:
 
     # Manipuladores de eventos
     async def _on_authenticated(self, data: Dict[str, Any]) -> None:
-        """Gerenciar autenticação bem-sucedida"""
+        """Gerenciar autenticação bem sucedida"""
         if self.enable_logging:
             logger.success(" Autenticado com sucesso na PocketOption")
         self._connection_stats["successful_connections"] += 1
@@ -1365,7 +1365,7 @@ class AsyncPocketOptionClient:
             max_attempts: Número máximo de tentativas de reconexão
 
         Returns:
-            bool: True se a reconexão foi bem-sucedida
+            bool: True se a reconexão foi bem sucedida
         """
         logger.info(f"Tentando reconexão (máximo de {max_attempts} tentativas)...")
 
@@ -1389,11 +1389,11 @@ class AsyncPocketOptionClient:
                     success = await self._start_regular_connection()
 
                 if success:
-                    logger.info(f" Reconexão bem-sucedida na tentativa {attempt + 1}")
+                    logger.info(f" Reconexão bem sucedida na tentativa {attempt + 1}")
 
                     # Acionar evento de reconectado
                     await self._emit_event("reconnected", {})
-                    return True
+                    return True, 'Conexão bem sucedida'
                 else:
                     logger.warning(f"Tentativa de reconexão {attempt + 1} falhou")
 
@@ -1403,4 +1403,4 @@ class AsyncPocketOptionClient:
                 )
 
         logger.error(f"Todas as {max_attempts} tentativas de reconexão falharam")
-        return False
+        return False, 'Falha ao conectar'
