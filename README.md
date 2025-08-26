@@ -153,12 +153,13 @@ Exemplo de formato de SSID:
 42["auth",{"session":"abcd1234efgh5678","isDemo":1,"uid":12345,"platform":1}]
 ```
 
-Se você não conseguir encontrá-lo, tente executar o script de extração automática de SSID na pasta `tools_ferramentas`.
+Se você não conseguir encontrá-lo, tente executar o script de extração automática de SSID na pasta [tools_ferramentas](tools_ferramentas).
 
 ## 📂 Estrutura do Projeto
 
 ```
-pocketoptionapi/
+pocketoptionapi_async/
+├── __init__.py            # Inicialização do pacote
 ├── client.py              # Cliente principal da API
 ├── config.py              # Configurações da API
 ├── connection_keep_alive.py # Manutenção de conexão
@@ -169,7 +170,6 @@ pocketoptionapi/
 ├── monitoring.py          # Ferramentas de monitoramento
 ├── utils.py               # Funções utilitárias
 ├── websocket_client.py    # Cliente WebSocket
-├── __init__.py            # Inicialização do pacote
 ```
 
 ## 🤝 Contribuindo
