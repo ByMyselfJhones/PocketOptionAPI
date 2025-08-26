@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pocketoptionapi"
+version = "2.0.0"
+description = "Async Python API não oficial para PocketOption (ByMyselfJhones)."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "ByMyselfJhones", email = "jhonestradersoficial@gmail.com" }
+]
+maintainers = [
+    { name = "ByMyselfJhones", email = "jhonestradersoficial@gmail.com" }
+]
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "aiohttp>=3.8.0",
+    "certifi>=2025.6.15",
+    "charset-normalizer>=3.4.2",
+    "colorama>=0.4.6",
+    "idna>=3.10",
+    "loguru>=0.7.2",
+    "numpy>=2.3.1",
+    "pandas>=2.3.0",
+    "psutil>=5.9.0",
+    "pydantic>=2.0.0",
+    "python-dateutil>=2.9.0.post0",
+    "python-dotenv>=1.0.0",
+    "pytz>=2025.2",
+    "requests>=2.32.4",
+    "rich>=13.0.0",
+    "selenium>=4.0.0",
+    "setuptools>=80.9.0",
+    "six>=1.17.0",
+    "typing-extensions>=4.0.0",
+    "tzdata>=2025.2",
+    "tzlocal>=5.3.1",
+    "urllib3>=2.5.0",
+    "webdriver-manager>=4.0.0",
+    "websocket-client>=1.8.0",
+    "websockets>=15.0.1",
+    "wheel>=0.45.1",
+]
+
+[tool.setuptools]
+packages = ["pocketoptionapi_async"]
+
+[project.urls]
+Homepage = "https://github.com/ByMyselfJhones/PocketOptionAPI"
+"Bug Tracker" = "https://github.com/ByMyselfJhones/PocketOptionAPI/issues"
