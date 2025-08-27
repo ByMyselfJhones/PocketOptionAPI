@@ -82,7 +82,7 @@ tzlocal==5.3.1
 urllib3==2.5.0
 webdriver-manager==4.0.2
 websocket-client==1.8.0
-websockets==15.0.1
+websockets==11.0.3
 wheel==0.45.1
 attrs==25.3.0
 cffi==1.17.1
