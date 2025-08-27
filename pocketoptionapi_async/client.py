@@ -13,24 +13,11 @@ import asyncio
 import json
 import time
 import uuid
-from contextlib import suppress
 from typing import Optional, List, Dict, Any, Union, Callable
 from datetime import datetime, timedelta
 from collections import defaultdict
-
 import pandas as pd
-import requests
-from requests.exceptions import RequestException
 from loguru import logger
-
-# Selenium (fallback opcional)
-try:
-    import undetected_chromedriver as uc
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-except Exception:  # não obrigar selenium se não instalado
-    uc = None
 
 from .monitoring import error_monitor, health_checker, ErrorCategory, ErrorSeverity
 from .websocket_client import AsyncWebSocketClient
@@ -55,20 +42,12 @@ from .exceptions import (
 
 class AsyncPocketOptionClient:
     """
-    Cliente assíncrono profissional para API da PocketOption com práticas modernas de Python
-
-    Agora com suporte a:
-    - ssid (string completa ou id de sessão) OU
-    - email + password  -> login automático e captura do SSID (cookie 'ci_session')
+    Professional async PocketOption API client with modern Python practices
     """
 
     def __init__(
         self,
-        ssid: Optional[str] = None,
-        # novos parâmetros:
-        email: Optional[str] = None,
-        password: Optional[str] = None,
-        #
+        ssid: str,
         is_demo: bool = True,
         region: Optional[str] = None,
         uid: int = 0,
@@ -77,38 +56,22 @@ class AsyncPocketOptionClient:
         persistent_connection: bool = False,
         auto_reconnect: bool = True,
         enable_logging: bool = True,
-        # ajustes/fallbacks de login:
-        login_language: str = "pt",        # caminho /pt/ ou /en/
-        selenium_headless: bool = True,    # fallback headless
-        selenium_wait_timeout: int = 25,   # segundos
     ):
         """
-        Inicializa cliente assíncrono da PocketOption com monitoramento aprimorado
+        Initialize async PocketOption client with enhanced monitoring
 
         Args:
-            ssid: SSID completo (42["auth", {...}]) ou o valor bruto do cookie 'ci_session' ou ainda um session_id simples
-            email/password: usados se ssid não for fornecido; o client fará login e obterá o cookie 'ci_session'
-            is_demo: usar conta demo? (afeta a flag 'isDemo' do auth WS)
-            region: região preferida
-            uid/platform/is_fast_history: mantidos p/ compatibilidade (uid pode ser 0; o servidor resolve pelo cookie)
-            persistent_connection/auto_reconnect/enable_logging: comportamentos de conexão
-            login_language: subpath do site (pt, en, etc.) para o login
-            selenium_headless: se True, usa Chrome headless no fallback
-            selenium_wait_timeout: timeout de espera de elementos na página
+            ssid: Complete SSID string or raw session ID for authentication
+            is_demo: Whether to use demo account
+            region: Preferred region for connection
+            uid: User ID (if providing raw session)
+            platform: Platform identifier (1=web, 3=mobile)
+            is_fast_history: Enable fast history loading
+            persistent_connection: Enable persistent connection with keep-alive (like old API)
+            auto_reconnect: Enable automatic reconnection on disconnection
+            enable_logging: Enable detailed logging (default: True)
         """
-        # Preferências
-        self.enable_logging = enable_logging
-        if not enable_logging:
-            logger.remove()
-            logger.add(lambda msg: None, level="CRITICAL")
-
-        # Credenciais
-        self.email = email
-        self.password = password
-        self.login_language = (login_language or "pt").strip("/")
-
-        # Sessão/SSID
-        self.raw_ssid = ssid or ""
+        self.raw_ssid = ssid
         self.is_demo = is_demo
         self.preferred_region = region
         self.uid = uid
@@ -116,24 +79,22 @@ class AsyncPocketOptionClient:
         self.is_fast_history = is_fast_history
         self.persistent_connection = persistent_connection
         self.auto_reconnect = auto_reconnect
+        self.enable_logging = enable_logging
 
-        self.selenium_headless = selenium_headless
-        self.selenium_wait_timeout = int(selenium_wait_timeout)
+        # Configure logging based on preference
+        if not enable_logging:
+            logger.remove()
+            logger.add(lambda msg: None, level="CRITICAL")  # Disable most logging
+        # Parse SSID if it's a complete auth message
+        self._original_demo = None  # Store original demo value from SSID
+        if ssid.startswith('42["auth",'):
+            self._parse_complete_ssid(ssid)
+        else:
+            # Treat as raw session ID
+            self.session_id = ssid
+            self._complete_ssid = None
 
-        # Estado de SSID/Session
-        self._original_demo = None
-        self.session_id: str = ""
-        self._complete_ssid: Optional[str] = None
-
-        # Se veio um SSID já no formato completo, parseia; caso contrário, trata como sessão/cookie bruto
-        if self.raw_ssid:
-            if self.raw_ssid.startswith('42["auth",'):
-                self._parse_complete_ssid(self.raw_ssid)
-            else:
-                # Pode ser o cookie 'ci_session' (a:4:{...}HASH) ou um id simples
-                self.session_id = self.raw_ssid
-
-        # Componentes principais e estados internos
+        # Core components
         self._websocket = AsyncWebSocketClient()
         self._balance: Optional[Balance] = None
         self._orders: Dict[str, OrderResult] = {}
@@ -142,19 +103,27 @@ class AsyncPocketOptionClient:
         self._candles_cache: Dict[str, List[Candle]] = {}
         self._server_time: Optional[ServerTime] = None
         self._event_callbacks: Dict[str, List[Callable]] = defaultdict(list)
+        # Setup event handlers for websocket messages
         self._setup_event_handlers()
+
+        # Add handler for JSON data messages (contains detailed order data)
+        self._websocket.add_event_handler("json_data", self._on_json_data)
+        # Enhanced monitoring and error handling
 
         self._error_monitor = error_monitor
         self._health_checker = health_checker
 
+        # Performance tracking
         self._operation_metrics: Dict[str, List[float]] = defaultdict(list)
         self._last_health_check = time.time()
 
+        # Keep-alive functionality (based on old API patterns)
         self._keep_alive_manager = None
         self._ping_task: Optional[asyncio.Task] = None
         self._reconnect_task: Optional[asyncio.Task] = None
         self._is_persistent = False
 
+        # Connection statistics (like old API)
         self._connection_stats = {
             "total_connections": 0,
             "successful_connections": 0,
@@ -166,257 +135,39 @@ class AsyncPocketOptionClient:
         }
 
         logger.info(
-            f"Cliente PocketOption inicializado (demo={is_demo}, uid={self.uid}, persistente={persistent_connection}) com login {'via SSID' if bool(ssid) else 'via email/senha' if (email and password) else 'sem credenciais definidas'}"
+            f"Initialized PocketOption client (demo={is_demo}, uid={self.uid}, persistent={persistent_connection}) with enhanced monitoring"
             if enable_logging
             else ""
         )
 
-    # ===================== Login Helpers =====================
-
-    def _mask(self, s: str, keep: int = 6) -> str:
-        """Mascara strings sensíveis para logs"""
-        if not s:
-            return ""
-        if len(s) <= keep * 2:
-            return "*" * len(s)
-        return f"{s[:keep]}...{s[-keep:]}"
-
-    def _base_site(self) -> str:
-        return "https://pocketoption.com"
-
-    def _login_urls(self) -> Dict[str, str]:
-        lang = self.login_language
-        return {
-            "login_page": f"{self._base_site()}/{lang}/login/",
-            "home": f"{self._base_site()}/{lang}/",
-            # endpoints comuns (alguns clientes usam ajax/login/ ou signin/)
-            "ajax_login": f"{self._base_site()}/ajax/login/",
-            "ajax_signin": f"{self._base_site()}/signin/",
-        }
-
-    def _obtain_ci_session_via_http(self) -> Optional[str]:
-        """
-        Tenta executar login HTTP para capturar o cookie 'ci_session'.
-        Nota: endpoints podem mudar; por isso há fallback Selenium.
-        """
-        urls = self._login_urls()
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Referer": urls["home"],
-        })
-
-        try:
-            # Carrega página para obter cookies iniciais/CSRF (se houver)
-            session.get(urls["login_page"], timeout=20)
-
-            candidate_payloads = [
-                {"email": self.email, "password": self.password},
-                {"login": self.email, "password": self.password},
-                {"username": self.email, "password": self.password},
-            ]
-
-            for endpoint in ("ajax_login", "ajax_signin"):
-                post_url = urls[endpoint]
-                for payload in candidate_payloads:
-                    try:
-                        session.post(post_url, data=payload, timeout=20, allow_redirects=True)
-                    except RequestException:
-                        continue
-
-            # alguns fluxos setam cookie após navegar
-            session.get(urls["home"], timeout=15)
-
-            # busca cookie do domínio raiz (CodeIgniter default: 'ci_session')
-            for c in session.cookies:
-                if "ci_session" in c.name.lower() and c.value:
-                    cookie_val = c.value
-                    logger.info(f"Login HTTP obteve cookie ci_session: {self._mask(cookie_val)}")
-                    return cookie_val
-
-        except RequestException as e:
-            logger.warning(f"Login HTTP falhou: {e}")
-
-        return None
-
-    def _obtain_ci_session_via_selenium(self) -> Optional[str]:
-        """
-        Fallback por Selenium (undetected-chromedriver) para logar e capturar 'ci_session'
-        """
-        if uc is None:
-            logger.warning("Selenium/undetected-chromedriver não instalado. Pulei fallback Selenium.")
-            return None
-
-        urls = self._login_urls()
-
-        options = uc.ChromeOptions()
-        if self.selenium_headless:
-            options.add_argument("--headless=new")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--window-size=1280,800")
-        options.add_argument("--lang=pt-BR")
-
-        driver = None
-        try:
-            driver = uc.Chrome(options=options)
-            driver.set_page_load_timeout(60)
-
-            driver.get(urls["login_page"])
-
-            # Seletores comuns (ajuste se seu front for diferente)
-            candidates_email = [
-                (By.NAME, "email"),
-                (By.NAME, "login"),
-                (By.CSS_SELECTOR, "input[type='email']"),
-                (By.ID, "email"),
-            ]
-            candidates_password = [
-                (By.NAME, "password"),
-                (By.CSS_SELECTOR, "input[type='password']"),
-                (By.ID, "password"),
-            ]
-            candidates_submit = [
-                (By.CSS_SELECTOR, "button[type='submit']"),
-                (By.CSS_SELECTOR, "button.login__btn"),
-                (By.XPATH, "//button[contains(.,'Entrar') or contains(.,'Login') or contains(.,'Sign in')]"),
-            ]
-
-            # encontra campo e-mail
-            email_elt = None
-            for by, sel in candidates_email:
-                with suppress(Exception):
-                    email_elt = WebDriverWait(driver, self.selenium_wait_timeout).until(
-                        EC.presence_of_element_located((by, sel))
-                    )
-                    if email_elt:
-                        break
-            if not email_elt:
-                raise RuntimeError("Campo de e-mail não encontrado na página de login.")
-
-            # encontra campo senha
-            pass_elt = None
-            for by, sel in candidates_password:
-                with suppress(Exception):
-                    pass_elt = WebDriverWait(driver, self.selenium_wait_timeout).until(
-                        EC.presence_of_element_located((by, sel))
-                    )
-                    if pass_elt:
-                        break
-            if not pass_elt:
-                raise RuntimeError("Campo de senha não encontrado na página de login.")
-
-            email_elt.clear()
-            email_elt.send_keys(self.email)
-            pass_elt.clear()
-            pass_elt.send_keys(self.password)
-
-            # clicar no botão de submit
-            submit_elt = None
-            for by, sel in candidates_submit:
-                with suppress(Exception):
-                    submit_elt = driver.find_element(by, sel)
-                    if submit_elt:
-                        break
-            if not submit_elt:
-                pass_elt.submit()
-            else:
-                submit_elt.click()
-
-            # Espera redirecionar/logar (procura algum elemento do painel)
-            with suppress(Exception):
-                WebDriverWait(driver, self.selenium_wait_timeout).until(
-                    EC.url_contains("/cabinet")
-                )
-            # como alguns ambientes não redirecionam, navega pra home
-            with suppress(Exception):
-                driver.get(urls["home"])
-
-            # pega cookies e procura ci_session
-            cookies = driver.get_cookies()
-            for c in cookies:
-                name = (c.get("name") or "").lower()
-                val = c.get("value") or ""
-                if "ci_session" in name and val:
-                    logger.info(f"Login Selenium obteve cookie ci_session: {self._mask(val)}")
-                    return val
-
-        except Exception as e:
-            logger.warning(f"Login Selenium falhou: {e}")
-        finally:
-            with suppress(Exception):
-                if driver:
-                    driver.quit()
-
-        return None
-
-    async def _ensure_session_credentials(self) -> None:
-        """
-        Garante que self.session_id esteja pronto.
-        Se não houver SSID configurado, e houver email+password, tenta login HTTP e depois Selenium (em threads).
-        """
-        if self.session_id:
-            return
-
-        if not (self.email and self.password):
-            raise AuthenticationError(
-                "Nenhum SSID e nenhuma combinação email/senha fornecida para autenticação."
-            )
-
-        logger.info("Nenhum SSID fornecido. Tentando login via HTTP para obter 'ci_session'...")
-
-        # executa métodos bloqueantes em thread para não travar o loop
-        cookie_val = await asyncio.to_thread(self._obtain_ci_session_via_http)
-
-        if not cookie_val:
-            logger.info("Login HTTP não retornou 'ci_session'. Tentando fallback via Selenium...")
-            cookie_val = await asyncio.to_thread(self._obtain_ci_session_via_selenium)
-
-        if not cookie_val:
-            raise AuthenticationError("Falha ao obter 'ci_session' por HTTP e Selenium.")
-
-        # Guarda o cookie (é exatamente o valor que você colava como 'session' no 42['auth',...])
-        self.session_id = cookie_val
-        self.raw_ssid = ""  # limpa formato completo, vamos sempre construir a partir de session_id
-
-    # ===================== Fim dos Helpers de Login =====================
-
     def _setup_event_handlers(self):
-        """Configurar manipuladores de eventos WebSocket"""
+        """Setup WebSocket event handlers"""
         self._websocket.add_event_handler("authenticated", self._on_authenticated)
         self._websocket.add_event_handler("balance_updated", self._on_balance_updated)
-        self._websocket.add_event_handler("balance_data", self._on_balance_data)
+        self._websocket.add_event_handler(
+            "balance_data", self._on_balance_data
+        )  # Add balance_data handler
         self._websocket.add_event_handler("order_opened", self._on_order_opened)
         self._websocket.add_event_handler("order_closed", self._on_order_closed)
         self._websocket.add_event_handler("stream_update", self._on_stream_update)
         self._websocket.add_event_handler("candles_received", self._on_candles_received)
         self._websocket.add_event_handler("disconnected", self._on_disconnected)
-        self._websocket.add_event_handler("json_data", self._on_json_data)
 
     async def connect(
         self, regions: Optional[List[str]] = None, persistent: Optional[bool] = None
-    ) -> tuple[bool, str]:
+    ) -> bool:
         """
-        Conectar à PocketOption com suporte a múltiplas regiões.
-        Retorna (ok: bool, mensagem: str)
+        Connect to PocketOption with multiple region support
+
+        Args:
+            regions: List of regions to try (uses defaults if None)
+            persistent: Override persistent connection setting
+
+        Returns:
+            bool: True if connected successfully
         """
-        logger.info("Conectando à PocketOption...")
-
-        # Garante que temos session_id (gera via email/senha se preciso)
-        try:
-            await self._ensure_session_credentials()
-        except AuthenticationError as e:
-            logger.error(f"Falha de autenticação: {e}")
-            await self._error_monitor.record_error(
-                error_type="auth_failed",
-                severity=ErrorSeverity.HIGH,
-                category=ErrorCategory.AUTHENTICATION,
-                message=str(e),
-            )
-            return False, "Falha ao autenticar"
-
+        logger.info("Connecting to PocketOption...")
+        # Update persistent setting if provided
         if persistent is not None:
             self.persistent_connection = bool(persistent)
 
@@ -427,35 +178,41 @@ class AsyncPocketOptionClient:
                 return await self._start_regular_connection(regions)
 
         except Exception as e:
-            logger.error(f"Falha na conexão: {e}")
+            logger.error(f"Connection failed: {e}")
             await self._error_monitor.record_error(
                 error_type="connection_failed",
                 severity=ErrorSeverity.HIGH,
                 category=ErrorCategory.CONNECTION,
-                message=f"Falha na conexão: {e}",
+                message=f"Connection failed: {e}",
             )
-            return False, "Falha ao conectar"
+            return False
 
     async def _start_regular_connection(
         self, regions: Optional[List[str]] = None
-    ) -> tuple[bool, str]:
-        """Iniciar conexão regular (comportamento existente). Retorna (ok, msg)."""
-        logger.info("Iniciando conexão regular...")
-
+    ) -> bool:
+        """Start regular connection (existing behavior)"""
+        logger.info("Starting regular connection...")
+        # Use appropriate regions based on demo mode
         if not regions:
             if self.is_demo:
+                # For demo mode, only use demo regions
                 demo_urls = REGIONS.get_demo_regions()
                 regions = []
                 all_regions = REGIONS.get_all_regions()
                 for name, url in all_regions.items():
                     if url in demo_urls:
                         regions.append(name)
-                logger.info(f"Modo demo: Usando regiões demo: {regions}")
+                logger.info(f"Demo mode: Using demo regions: {regions}")
             else:
+                # For live mode, use all regions except demo
                 all_regions = REGIONS.get_all_regions()
-                regions = [name for name, url in all_regions.items() if "DEMO" not in name.upper()]
-                logger.info(f"Modo live: Usando regiões não-demo: {regions}")
-
+                regions = [
+                    name
+                    for name, url in all_regions.items()
+                    if "DEMO" not in name.upper()
+                ]
+                logger.info(f"Live mode: Using non-demo regions: {regions}")
+        # Update connection stats
         self._connection_stats["total_connections"] += 1
         self._connection_stats["connection_start_time"] = time.time()
 
@@ -465,129 +222,178 @@ class AsyncPocketOptionClient:
                 if not region_url:
                     continue
 
-                urls = [region_url]
-                logger.info(f"Tentando região: {region} com URL: {region_url}")
+                urls = [region_url]  # Convert single URL to list
+                logger.info(f"Trying region: {region} with URL: {region_url}")
 
+                # Try to connect
                 ssid_message = self._format_session_message()
                 success = await self._websocket.connect(urls, ssid_message)
 
                 if success:
-                    logger.info(f" Conectado à região: {region}")
+                    logger.info(f" Connected to region: {region}")
 
+                    # Wait for authentication
                     await self._wait_for_authentication()
+
+                    # Initialize data
                     await self._initialize_data()
+
+                    # Start keep-alive tasks
                     await self._start_keep_alive_tasks()
 
-                    logger.info("Conectado e autenticado com sucesso")
-                    return True, "Conexão bem sucedida"
+                    self._connection_stats["successful_connections"] += 1
+                    logger.info("Successfully connected and authenticated")
+                    return True
 
             except Exception as e:
-                logger.warning(f"Falha ao conectar à região {region}: {e}")
+                logger.warning(f"Failed to connect to region {region}: {e}")
                 continue
 
-        return False, "Falha ao conectar"
+        return False
 
     async def _start_persistent_connection(
         self, regions: Optional[List[str]] = None
-    ) -> tuple[bool, str]:
-        """Iniciar conexão persistente com keep-alive (como API antiga). Retorna (ok, msg)."""
-        logger.info("Iniciando conexão persistente com keep-alive automático...")
+    ) -> bool:
+        """Start persistent connection with keep-alive (like old API)"""
+        logger.info("Starting persistent connection with automatic keep-alive...")
 
+        # Import the keep-alive manager
         from .connection_keep_alive import ConnectionKeepAlive
 
-        # sempre enviar a mensagem de autenticação completa
-        complete_ssid = self._format_session_message()
+        # Create keep-alive manager
+        complete_ssid = self.raw_ssid
         self._keep_alive_manager = ConnectionKeepAlive(complete_ssid, self.is_demo)
 
-        self._keep_alive_manager.add_event_handler("connected", self._on_keep_alive_connected)
-        self._keep_alive_manager.add_event_handler("reconnected", self._on_keep_alive_reconnected)
-        self._keep_alive_manager.add_event_handler("message_received", self._on_keep_alive_message)
+        # Add event handlers
+        self._keep_alive_manager.add_event_handler(
+            "connected", self._on_keep_alive_connected
+        )
+        self._keep_alive_manager.add_event_handler(
+            "reconnected", self._on_keep_alive_reconnected
+        )
+        self._keep_alive_manager.add_event_handler(
+            "message_received", self._on_keep_alive_message
+        )
 
-        self._keep_alive_manager.add_event_handler("balance_data", self._on_balance_data)
-        self._keep_alive_manager.add_event_handler("balance_updated", self._on_balance_updated)
-        self._keep_alive_manager.add_event_handler("authenticated", self._on_authenticated)
-        self._keep_alive_manager.add_event_handler("order_opened", self._on_order_opened)
-        self._keep_alive_manager.add_event_handler("order_closed", self._on_order_closed)
-        self._keep_alive_manager.add_event_handler("stream_update", self._on_stream_update)
+        # Add handlers for forwarded WebSocket events
+        self._keep_alive_manager.add_event_handler(
+            "balance_data", self._on_balance_data
+        )
+        self._keep_alive_manager.add_event_handler(
+            "balance_updated", self._on_balance_updated
+        )
+        self._keep_alive_manager.add_event_handler(
+            "authenticated", self._on_authenticated
+        )
+        self._keep_alive_manager.add_event_handler(
+            "order_opened", self._on_order_opened
+        )
+        self._keep_alive_manager.add_event_handler(
+            "order_closed", self._on_order_closed
+        )
+        self._keep_alive_manager.add_event_handler(
+            "stream_update", self._on_stream_update
+        )
         self._keep_alive_manager.add_event_handler("json_data", self._on_json_data)
 
+        # Connect with keep-alive
         success = await self._keep_alive_manager.connect_with_keep_alive(regions)
 
         if success:
             self._is_persistent = True
-            logger.info(" Conexão persistente estabelecida com sucesso")
-            return True, "Conexão bem sucedida"
+            logger.info(" Persistent connection established successfully")
+            return True
         else:
-            logger.error("Falha ao estabelecer conexão persistente")
-            return False, "Falha ao conectar"
+            logger.error("Failed to establish persistent connection")
+            return False
 
     async def _start_keep_alive_tasks(self):
-        """Iniciar tarefas de keep-alive para conexão regular"""
-        logger.info("Iniciando tarefas de keep-alive para conexão regular...")
+        """Start keep-alive tasks for regular connection"""
+        logger.info("Starting keep-alive tasks for regular connection...")
+
+        # Start ping task (like old API)
         self._ping_task = asyncio.create_task(self._ping_loop())
+
+        # Start reconnection monitor if auto_reconnect is enabled
         if self.auto_reconnect:
             self._reconnect_task = asyncio.create_task(self._reconnection_monitor())
 
     async def _ping_loop(self):
-        """Loop de ping para conexões regulares (como API antiga)"""
+        """Ping loop for regular connections (like old API)"""
         while self.is_connected and not self._is_persistent:
             try:
                 await self._websocket.send_message('42["ps"]')
                 self._connection_stats["last_ping_time"] = time.time()
-                await asyncio.sleep(20)
+                await asyncio.sleep(20)  # Ping every 20 seconds
             except Exception as e:
-                logger.warning(f"Falha no ping: {e}")
+                logger.warning(f"Ping failed: {e}")
                 break
 
     async def _reconnection_monitor(self):
-        """Monitorar e gerenciar reconexões para conexões regulares"""
+        """Monitor and handle reconnections for regular connections"""
         while self.auto_reconnect and not self._is_persistent:
-            await asyncio.sleep(30)
+            await asyncio.sleep(30)  # Check every 30 seconds
+
             if not self.is_connected:
-                logger.info("Conexão perdida, tentando reconectar...")
+                logger.info("Connection lost, attempting reconnection...")
                 self._connection_stats["total_reconnects"] += 1
+
                 try:
-                    ok, _msg = await self._start_regular_connection()
-                    if ok:
-                        logger.info(" Reconexão bem sucedida")
+                    success = await self._start_regular_connection()
+                    if success:
+                        logger.info(" Reconnection successful")
                     else:
-                        logger.error("Falha na reconexão")
-                        await asyncio.sleep(10)
+                        logger.error("Reconnection failed")
+                        await asyncio.sleep(10)  # Wait before next attempt
                 except Exception as e:
-                    logger.error(f"Erro na reconexão: {e}")
+                    logger.error(f"Reconnection error: {e}")
                     await asyncio.sleep(10)
 
     async def disconnect(self) -> None:
-        """Desconectar da PocketOption e limpar todos os recursos"""
-        logger.info("Desconectando da PocketOption...")
+        """Disconnect from PocketOption and cleanup all resources"""
+        logger.info("Disconnecting from PocketOption...")
+
+        # Cancel tasks
         if self._ping_task:
             self._ping_task.cancel()
         if self._reconnect_task:
             self._reconnect_task.cancel()
 
+        # Disconnect based on connection type
         if self._is_persistent and self._keep_alive_manager:
             await self._keep_alive_manager.disconnect()
         else:
             await self._websocket.disconnect()
 
+        # Reset state
         self._is_persistent = False
         self._balance = None
         self._orders.clear()
-        logger.info("Desconectado com sucesso")
+
+        logger.info("Disconnected successfully")
 
     async def get_balance(self) -> Balance:
         """
-        Obter saldo atual da conta.
+        Get current account balance
+
+        Returns:
+            Balance: Current balance information
         """
         if not self.is_connected:
-            raise ConnectionError("Não conectado à PocketOption")
+            raise ConnectionError("Not connected to PocketOption")
 
-        if (not self._balance) or (datetime.now() - self._balance.last_updated).seconds > 60:
+        # Request balance update if needed
+        if (
+            not self._balance
+            or (datetime.now() - self._balance.last_updated).seconds > 60
+        ):
             await self._request_balance_update()
+
+            # Wait a bit for balance to be received
             await asyncio.sleep(1)
 
         if not self._balance:
-            raise PocketOptionError("Dados de saldo não disponíveis")
+            raise PocketOptionError("Balance data not available")
 
         return self._balance
 
@@ -595,80 +401,147 @@ class AsyncPocketOptionClient:
         self, asset: str, amount: float, direction: OrderDirection, duration: int
     ) -> OrderResult:
         """
-        Enviar ordem binária.
+        Place a binary options order
+
+        Args:
+            asset: Asset symbol (e.g., "EURUSD_otc")
+            amount: Order amount
+            direction: OrderDirection.CALL or OrderDirection.PUT
+            duration: Duration in seconds
+
+        Returns:
+            OrderResult: Order placement result
         """
         if not self.is_connected:
-            raise ConnectionError("Não conectado à PocketOption")
+            raise ConnectionError("Not connected to PocketOption")
+            # Validate parameters
         self._validate_order_parameters(asset, amount, direction, duration)
 
         try:
+            # Create order
             order_id = str(uuid.uuid4())
             order = Order(
                 asset=asset,
                 amount=amount,
                 direction=direction,
                 duration=duration,
-                request_id=order_id,
-            )
+                request_id=order_id,  # Use request_id, not order_id
+            )  # Send order
             await self._send_order(order)
+
+            # Wait for result (this will either get the real server response or create a fallback)
             result = await self._wait_for_order_result(order_id, order)
-            logger.info(f"Ordem colocada: {result.order_id} - {result.status}")
+
+            # Don't store again - _wait_for_order_result already handles storage
+            logger.info(f"Order placed: {result.order_id} - {result.status}")
             return result
+
         except Exception as e:
-            logger.error(f"Falha ao colocar ordem: {e}")
-            raise OrderError(f"Falha ao colocar ordem: {e}")
+            logger.error(f"Order placement failed: {e}")
+            raise OrderError(f"Failed to place order: {e}")
 
     async def get_candles(
-        self, asset: str, timeframe: Union[str, int], count: int = 100, end_time: Optional[datetime] = None
+        self,
+        asset: str,
+        timeframe: Union[str, int],
+        count: int = 100,
+        end_time: Optional[datetime] = None,
     ) -> List[Candle]:
         """
-        Obter dados de candles. (Observação: o parâmetro `count` pode não ser respeitado pela API de stream usada.)
+        Get historical candle data with automatic reconnection
+
+        Args:
+            asset: Asset symbol
+            timeframe: Timeframe (e.g., "1m", "5m", 60)
+            count: Number of candles to retrieve
+            end_time: End time for data (defaults to now)
+
+        Returns:
+            List[Candle]: Historical candle data
         """
+        # Check connection and attempt reconnection if needed
         if not self.is_connected:
             if self.auto_reconnect:
-                logger.info(f"Conexão perdida, tentando reconectar para candles de {asset}...")
-                ok, _ = await self._attempt_reconnection()
-                if not ok:
-                    raise ConnectionError("Não conectado à PocketOption e reconexão falhou")
+                logger.info(
+                    f"Connection lost, attempting reconnection for {asset} candles..."
+                )
+                reconnected = await self._attempt_reconnection()
+                if not reconnected:
+                    raise ConnectionError(
+                        "Not connected to PocketOption and reconnection failed"
+                    )
             else:
-                raise ConnectionError("Não conectado à PocketOption")
+                raise ConnectionError("Not connected to PocketOption")
 
+        # Convert timeframe to seconds
         if isinstance(timeframe, str):
             timeframe_seconds = TIMEFRAMES.get(timeframe, 60)
         else:
             timeframe_seconds = timeframe
 
+        # Validate asset
         if asset not in ASSETS:
-            raise InvalidParameterError(f"Ativo inválido: {asset}")
+            raise InvalidParameterError(f"Invalid asset: {asset}")
 
+        # Set default end time
         if not end_time:
             end_time = datetime.now()
 
         max_retries = 2
         for attempt in range(max_retries):
             try:
-                candles = await self._request_candles(asset, timeframe_seconds, count, end_time)
+                # Request candle data
+                candles = await self._request_candles(
+                    asset, timeframe_seconds, count, end_time
+                )
+
+                # Cache results
                 cache_key = f"{asset}_{timeframe_seconds}"
                 self._candles_cache[cache_key] = candles
-                logger.info(f"Recuperados {len(candles)} candles para {asset}")
+
+                logger.info(f"Retrieved {len(candles)} candles for {asset}")
                 return candles
+
             except Exception as e:
                 if "WebSocket is not connected" in str(e) and attempt < max_retries - 1:
-                    logger.warning(f"Conexão perdida durante solicitação de candles para {asset}, tentando reconectar...")
+                    logger.warning(
+                        f"Connection lost during candle request for {asset}, attempting reconnection..."
+                    )
                     if self.auto_reconnect:
-                        ok, _ = await self._attempt_reconnection()
-                        if ok:
-                            logger.info(" Reconectado, tentando novamente solicitação de candles")
+                        reconnected = await self._attempt_reconnection()
+                        if reconnected:
+                            logger.info(
+                                f" Reconnected, retrying candle request for {asset}"
+                            )
                             continue
-                logger.error(f"Falha ao obter candles para {asset}: {e}")
-                raise PocketOptionError(f"Falha ao obter candles: {e}")
 
-        raise PocketOptionError(f"Falha ao obter candles após {max_retries} tentativas")
+                logger.error(f"Failed to get candles for {asset}: {e}")
+                raise PocketOptionError(f"Failed to get candles: {e}")
+
+        raise PocketOptionError(f"Failed to get candles after {max_retries} attempts")
 
     async def get_candles_dataframe(
-        self, asset: str, timeframe: Union[str, int], count: int = 100, end_time: Optional[datetime] = None
+        self,
+        asset: str,
+        timeframe: Union[str, int],
+        count: int = 100,
+        end_time: Optional[datetime] = None,
     ) -> pd.DataFrame:
+        """
+        Get historical candle data as DataFrame
+
+        Args:
+            asset: Asset symbol
+            timeframe: Timeframe (e.g., "1m", "5m", 60)
+            count: Number of candles to retrieve
+            end_time: End time for data (defaults to now)
+
+        Returns:
+            pd.DataFrame: Historical candle data
+        """
         candles = await self.get_candles(asset, timeframe, count, end_time)
+
+        # Convert to DataFrame
         data = []
         for candle in candles:
             data.append(
@@ -682,33 +555,72 @@ class AsyncPocketOptionClient:
                 }
             )
         df = pd.DataFrame(data)
+
         if not df.empty:
             df.set_index("timestamp", inplace=True)
             df.sort_index(inplace=True)
+
         return df
 
     async def check_order_result(self, order_id: str) -> Optional[OrderResult]:
+        """
+        Check the result of a specific order
+
+        Args:
+            order_id: Order ID to check
+
+        Returns:
+            OrderResult: Order result or None if not found
+        """
+        # First check active orders
         if order_id in self._active_orders:
             return self._active_orders[order_id]
+
+        # Then check completed orders
         if order_id in self._order_results:
             return self._order_results[order_id]
+
+        # Not found
         return None
 
     async def get_active_orders(self) -> List[OrderResult]:
+        """
+        Get all active orders
+
+        Returns:
+            List[OrderResult]: Active orders
+        """
         return list(self._active_orders.values())
 
     def add_event_callback(self, event: str, callback: Callable) -> None:
+        """
+        Add event callback
+
+        Args:
+            event: Event name (e.g., 'order_closed', 'balance_updated')
+            callback: Callback function
+        """
         if event not in self._event_callbacks:
             self._event_callbacks[event] = []
         self._event_callbacks[event].append(callback)
 
     def remove_event_callback(self, event: str, callback: Callable) -> None:
+        """
+        Remove event callback
+
+        Args:
+            event: Event name
+            callback: Callback function to remove
+        """
         if event in self._event_callbacks:
-            with suppress(ValueError):
+            try:
                 self._event_callbacks[event].remove(callback)
+            except ValueError:
+                pass
 
     @property
     def is_connected(self) -> bool:
+        """Check if client is connected (including persistent connections)"""
         if self._is_persistent and self._keep_alive_manager:
             return self._keep_alive_manager.is_connected
         else:
@@ -716,26 +628,28 @@ class AsyncPocketOptionClient:
 
     @property
     def connection_info(self):
+        """Get connection information (including persistent connections)"""
         if self._is_persistent and self._keep_alive_manager:
             return self._keep_alive_manager.connection_info
         else:
             return self._websocket.connection_info
 
-    async def send_message(self, message: str) -> tuple[bool, str]:
-        """Enviar mensagem pela conexão ativa. Retorna (ok, msg)."""
+    async def send_message(self, message: str) -> bool:
+        """Send message through active connection"""
         try:
             if self._is_persistent and self._keep_alive_manager:
-                ok = await self._keep_alive_manager.send_message(message)
-                return (True, "OK") if ok else (False, "Falha ao enviar via keep-alive")
+                return await self._keep_alive_manager.send_message(message)
             else:
                 await self._websocket.send_message(message)
-                return True, "OK"
+                return True
         except Exception as e:
-            logger.error(f"Falha ao enviar mensagem: {e}")
-            return False, "Falha ao conectar"
+            logger.error(f"Failed to send message: {e}")
+            return False
 
     def get_connection_stats(self) -> Dict[str, Any]:
+        """Get comprehensive connection statistics"""
         stats = self._connection_stats.copy()
+
         if self._is_persistent and self._keep_alive_manager:
             stats.update(self._keep_alive_manager.get_stats())
         else:
@@ -745,70 +659,94 @@ class AsyncPocketOptionClient:
                     "connection_info": self._websocket.connection_info,
                 }
             )
-        return stats
 
-    # ===================== Internos =====================
+        return stats  # Private methods
 
     def _format_session_message(self) -> str:
-        """Monta 42['auth', {...}] SEMPRE a partir de self.session_id atual."""
+        """Format session authentication message"""
+        # Always create auth message from components using constructor parameters
+        # This ensures is_demo parameter is respected regardless of SSID format
         auth_data = {
-            "session": self.session_id,                 # pode ser 'a:4:{...}HASH' (cookie) ou id simples
+            "session": self.session_id,
             "isDemo": 1 if self.is_demo else 0,
-            "uid": self.uid,                            # pode ser 0; servidor descobre pelo cookie
+            "uid": self.uid,
             "platform": self.platform,
         }
+
         if self.is_fast_history:
             auth_data["isFastHistory"] = True
 
         return f'42["auth",{json.dumps(auth_data)}]'
 
     def _parse_complete_ssid(self, ssid: str) -> None:
+        """Parse complete SSID auth message to extract components"""
         try:
+            # Extract JSON part
             json_start = ssid.find("{")
             json_end = ssid.rfind("}") + 1
             if json_start != -1 and json_end > json_start:
                 json_part = ssid[json_start:json_end]
                 data = json.loads(json_part)
+
                 self.session_id = data.get("session", "")
+                # Store original demo value from SSID, but don't override the constructor parameter
                 self._original_demo = bool(data.get("isDemo", 1))
-                self.uid = data.get("uid", self.uid)
-                self.platform = data.get("platform", self.platform)
+                # Keep the is_demo value from constructor - don't override it
+                self.uid = data.get("uid", 0)
+                self.platform = data.get("platform", 1)
+                # Don't store complete SSID - we'll reconstruct it with correct demo value
                 self._complete_ssid = None
         except Exception as e:
-            logger.warning(f"Falha ao analisar SSID: {e}")
+            logger.warning(f"Failed to parse SSID: {e}")
             self.session_id = ssid
             self._complete_ssid = None
 
     async def _wait_for_authentication(self, timeout: float = 10.0) -> None:
+        """Wait for authentication to complete (like old API)"""
         auth_received = False
 
-        def on_auth(_data):
+        def on_auth(data):
             nonlocal auth_received
             auth_received = True
 
+        # Add temporary handler
         self._websocket.add_event_handler("authenticated", on_auth)
+
         try:
+            # Wait for authentication
             start_time = time.time()
             while not auth_received and (time.time() - start_time) < timeout:
                 await asyncio.sleep(0.1)
 
             if not auth_received:
-                raise AuthenticationError("Tempo limite de autenticação")
+                raise AuthenticationError("Authentication timeout")
+
         finally:
+            # Remove temporary handler
             self._websocket.remove_event_handler("authenticated", on_auth)
 
     async def _initialize_data(self) -> None:
+        """Initialize client data after connection"""
+        # Request initial balance
         await self._request_balance_update()
+
+        # Setup time synchronization
         await self._setup_time_sync()
 
     async def _request_balance_update(self) -> None:
+        """Request balance update from server"""
         message = '42["getBalance"]'
+
+        # Use appropriate connection method
         if self._is_persistent and self._keep_alive_manager:
             await self._keep_alive_manager.send_message(message)
         else:
             await self._websocket.send_message(message)
 
     async def _setup_time_sync(self) -> None:
+        """Setup server time synchronization"""
+        # This would typically involve getting server timestamp
+        # For now, create a basic time sync object
         local_time = datetime.now().timestamp()
         self._server_time = ServerTime(
             server_timestamp=local_time, local_timestamp=local_time, offset=0.0
@@ -817,15 +755,16 @@ class AsyncPocketOptionClient:
     def _validate_order_parameters(
         self, asset: str, amount: float, direction: OrderDirection, duration: int
     ) -> None:
+        """Validate order parameters"""
         if asset not in ASSETS:
-            raise InvalidParameterError(f"Ativo inválido: {asset}")
+            raise InvalidParameterError(f"Invalid asset: {asset}")
 
         if (
             amount < API_LIMITS["min_order_amount"]
             or amount > API_LIMITS["max_order_amount"]
         ):
             raise InvalidParameterError(
-                f"Valor deve estar entre {API_LIMITS['min_order_amount']} e {API_LIMITS['max_order_amount']}"
+                f"Amount must be between {API_LIMITS['min_order_amount']} and {API_LIMITS['max_order_amount']}"
             )
 
         if (
@@ -833,215 +772,323 @@ class AsyncPocketOptionClient:
             or duration > API_LIMITS["max_duration"]
         ):
             raise InvalidParameterError(
-                f"Duração deve estar entre {API_LIMITS['min_duration']} e {API_LIMITS['max_duration']} segundos"
+                f"Duration must be between {API_LIMITS['min_duration']} and {API_LIMITS['max_duration']} seconds"
             )
 
     async def _send_order(self, order: Order) -> None:
+        """Send order to server"""
+        # Format asset name with # prefix if not already present
         asset_name = order.asset
-        message = (
-            f'42["openOrder",{{"asset":"{asset_name}","amount":{order.amount},"action":"{order.direction.value}",'
-            f'"isDemo":{1 if self.is_demo else 0},"requestId":"{order.request_id}","optionType":100,"time":{order.duration}}}]'
-        )
+
+        # Create the message in the correct PocketOption format
+        message = f'42["openOrder",{{"asset":"{asset_name}","amount":{order.amount},"action":"{order.direction.value}","isDemo":{1 if self.is_demo else 0},"requestId":"{order.request_id}","optionType":100,"time":{order.duration}}}]'
+
+        # Send using appropriate connection
         if self._is_persistent and self._keep_alive_manager:
             await self._keep_alive_manager.send_message(message)
         else:
             await self._websocket.send_message(message)
 
         if self.enable_logging:
-            logger.debug(f"Ordem enviada: {message}")
+            logger.debug(f"Sent order: {message}")
 
     async def _wait_for_order_result(
         self, request_id: str, order: Order, timeout: float = 30.0
     ) -> OrderResult:
+        """Wait for order execution result"""
         start_time = time.time()
+
+        # Wait for order to appear in tracking system
         while time.time() - start_time < timeout:
+            # Check if order was added to active orders (by _on_order_opened or _on_json_data)
             if request_id in self._active_orders:
                 if self.enable_logging:
-                    logger.success(f" Ordem {request_id} encontrada no rastreamento ativo")
+                    logger.success(f" Order {request_id} found in active tracking")
                 return self._active_orders[request_id]
+
+            # Check if order went directly to results (failed or completed)
             if request_id in self._order_results:
                 if self.enable_logging:
-                    logger.info(f"📋 Ordem {request_id} encontrada nos resultados concluídos")
+                    logger.info(f"📋 Order {request_id} found in completed results")
                 return self._order_results[request_id]
-            await asyncio.sleep(0.2)
 
+            await asyncio.sleep(0.2)  # Check every 200ms
+
+        # Check one more time before creating fallback
         if request_id in self._active_orders:
             if self.enable_logging:
-                logger.success(f" Ordem {request_id} encontrada no rastreamento ativo (verificação final)")
+                logger.success(
+                    f" Order {request_id} found in active tracking (final check)"
+                )
             return self._active_orders[request_id]
+
         if request_id in self._order_results:
             if self.enable_logging:
-                logger.info(f"📋 Ordem {request_id} encontrada nos resultados concluídos (verificação final)")
+                logger.info(
+                    f"📋 Order {request_id} found in completed results (final check)"
+                )
             return self._order_results[request_id]
 
+        # If timeout, create a fallback result with the original order data
         if self.enable_logging:
-            logger.warning(f"⏰ Ordem {request_id} atingiu timeout aguardando confirmação do servidor, criando resultado fallback")
-
+            logger.warning(
+                f"⏰ Order {request_id} timed out waiting for server response, creating fallback result"
+            )
         fallback_result = OrderResult(
             order_id=request_id,
             asset=order.asset,
             amount=order.amount,
             direction=order.direction,
             duration=order.duration,
-            status=OrderStatus.ACTIVE,
+            status=OrderStatus.ACTIVE,  # Assume it's active since it was placed
             placed_at=datetime.now(),
             expires_at=datetime.now() + timedelta(seconds=order.duration),
-            error_message="Timeout aguardando confirmação do servidor",
-        )
+            error_message="Timeout waiting for server confirmation",
+        )  # Store it in active orders in case server responds later
         self._active_orders[request_id] = fallback_result
         if self.enable_logging:
-            logger.info(f"📝 Criado resultado fallback para ordem {request_id}")
+            logger.info(f"📝 Created fallback order result for {request_id}")
         return fallback_result
 
-    async def check_win(self, order_id: str, max_wait_time: float = 300.0) -> Optional[Dict[str, Any]]:
+    async def check_win(
+        self, order_id: str, max_wait_time: float = 300.0
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Check win functionality - waits for trade completion message
+
+        Args:
+            order_id: Order ID to check
+            max_wait_time: Maximum time to wait for result (default 5 minutes)
+
+        Returns:
+            Dictionary with trade result or None if timeout/error
+        """
         start_time = time.time()
+
         if self.enable_logging:
-            logger.info(f"🔍 Iniciando check_win para ordem {order_id}, espera máxima: {max_wait_time}s")
+            logger.info(
+                f"🔍 Starting check_win for order {order_id}, max wait: {max_wait_time}s"
+            )
+
         while time.time() - start_time < max_wait_time:
+            # Check if order is in completed results
             if order_id in self._order_results:
                 result = self._order_results[order_id]
                 if self.enable_logging:
                     logger.success(
-                        f" Ordem {order_id} concluída - Status: {result.status.value}, Lucro: ${result.profit:.2f}"
+                        f" Order {order_id} completed - Status: {result.status.value}, Profit: ${result.profit:.2f}"
                     )
+
                 return {
-                    "result": "win" if result.status == OrderStatus.WIN else "loss" if result.status == OrderStatus.LOSE else "draw",
+                    "result": "win"
+                    if result.status == OrderStatus.WIN
+                    else "loss"
+                    if result.status == OrderStatus.LOSE
+                    else "draw",
                     "profit": result.profit if result.profit is not None else 0,
                     "order_id": order_id,
                     "completed": True,
                     "status": result.status.value,
                 }
 
+            # Check if order is still active (not expired yet)
             if order_id in self._active_orders:
                 active_order = self._active_orders[order_id]
-                time_remaining = (active_order.expires_at - datetime.now()).total_seconds()
+                time_remaining = (
+                    active_order.expires_at - datetime.now()
+                ).total_seconds()
+
                 if time_remaining <= 0:
                     if self.enable_logging:
-                        logger.info("⏰ Ordem expirou mas sem resultado ainda, continuando a aguardar...")
+                        logger.info(
+                            f"⏰ Order {order_id} expired but no result yet, continuing to wait..."
+                        )
                 else:
-                    if self.enable_logging and int(time.time() - start_time) % 10 == 0:
-                        logger.debug(f"⌛ Ordem ainda ativa, expira em {time_remaining:.0f}s")
+                    if (
+                        self.enable_logging and int(time.time() - start_time) % 10 == 0
+                    ):  # Log every 10 seconds
+                        logger.debug(
+                            f"⌛ Order {order_id} still active, expires in {time_remaining:.0f}s"
+                        )
 
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(1.0)  # Check every second
 
+        # Timeout reached
         if self.enable_logging:
-            logger.warning(f"⏰ Timeout no check_win para ordem {order_id} após {max_wait_time}s")
+            logger.warning(
+                f"⏰ check_win timeout for order {order_id} after {max_wait_time}s"
+            )
 
-        return {"result": "timeout", "order_id": order_id, "completed": False, "timeout": True}
+        return {
+            "result": "timeout",
+            "order_id": order_id,
+            "completed": False,
+            "timeout": True,
+        }
 
-    async def _request_candles(self, asset: str, timeframe: int, count: int, end_time: datetime):
-        data = {"asset": str(asset), "period": timeframe}
+    async def _request_candles(
+        self, asset: str, timeframe: int, count: int, end_time: datetime
+    ):
+        """Request candle data from server using the correct changeSymbol format"""
+
+        # Create message data in the format expected by PocketOption for real-time candles
+        data = {
+            "asset": str(asset),
+            "period": timeframe,  # timeframe in seconds
+        }
+
+        # Create the full message using changeSymbol
         message_data = ["changeSymbol", data]
         message = f"42{json.dumps(message_data)}"
 
         if self.enable_logging:
-            logger.debug(f"Solicitando candles com changeSymbol: {message}")
+            logger.debug(f"Requesting candles with changeSymbol: {message}")
 
+        # Create a future to wait for the response
         candle_future = asyncio.Future()
         request_id = f"{asset}_{timeframe}"
+
+        # Store the future for this request
         if not hasattr(self, "_candle_requests"):
             self._candle_requests = {}
         self._candle_requests[request_id] = candle_future
 
+        # Send the request using appropriate connection
         if self._is_persistent and self._keep_alive_manager:
             await self._keep_alive_manager.send_message(message)
         else:
             await self._websocket.send_message(message)
 
         try:
+            # Wait for the response (with timeout)
             candles = await asyncio.wait_for(candle_future, timeout=10.0)
             return candles
         except asyncio.TimeoutError:
             if self.enable_logging:
-                logger.warning(f"Solicitação de candles atingiu timeout para {asset}")
+                logger.warning(f"Candle request timed out for {asset}")
             return []
         finally:
+            # Clean up the request
             if request_id in self._candle_requests:
                 del self._candle_requests[request_id]
 
     def _parse_candles_data(self, candles_data: List[Any], asset: str, timeframe: int):
+        """Parse candles data from server response"""
         candles = []
+
         try:
             if isinstance(candles_data, list):
                 for candle_data in candles_data:
                     if isinstance(candle_data, (list, tuple)) and len(candle_data) >= 5:
+                        # Server format: [timestamp, open, low, high, close]
+                        # Note: Server sends low/high swapped compared to standard OHLC format
                         raw_high = float(candle_data[2])
                         raw_low = float(candle_data[3])
+
+                        # Ensure high >= low by swapping if necessary
                         actual_high = max(raw_high, raw_low)
                         actual_low = min(raw_high, raw_low)
+
                         candle = Candle(
                             timestamp=datetime.fromtimestamp(candle_data[0]),
                             open=float(candle_data[1]),
                             high=actual_high,
                             low=actual_low,
                             close=float(candle_data[4]),
-                            volume=float(candle_data[5]) if len(candle_data) > 5 else 0.0,
+                            volume=float(candle_data[5])
+                            if len(candle_data) > 5
+                            else 0.0,
                             asset=asset,
                             timeframe=timeframe,
                         )
                         candles.append(candle)
+
         except Exception as e:
             if self.enable_logging:
-                logger.error(f"Erro ao analisar dados de candles: {e}")
+                logger.error(f"Error parsing candles data: {e}")
+
         return candles
 
     async def _on_json_data(self, data: Dict[str, Any]) -> None:
+        """Handle detailed order data from JSON bytes messages"""
         if not isinstance(data, dict):
             return
-
-        # Resposta de candles (JSON detalhado)
+        # Check if this is candles data response
         if "candles" in data and isinstance(data["candles"], list):
+            # Find the corresponding candle request
             if hasattr(self, "_candle_requests"):
+                # Try to match the request based on asset and period
                 asset = data.get("asset")
                 period = data.get("period")
                 if asset and period:
                     request_id = f"{asset}_{period}"
-                    if request_id in self._candle_requests and not self._candle_requests[request_id].done():
-                        candles = self._parse_candles_data(data["candles"], asset, period)
+                    if (
+                        request_id in self._candle_requests
+                        and not self._candle_requests[request_id].done()
+                    ):
+                        candles = self._parse_candles_data(
+                            data["candles"], asset, period
+                        )
                         self._candle_requests[request_id].set_result(candles)
                         if self.enable_logging:
-                            logger.success(f" Dados de candles recebidos: {len(candles)} candles para {asset}")
+                            logger.success(
+                                f" Candles data received: {len(candles)} candles for {asset}"
+                            )
                         del self._candle_requests[request_id]
                         return
             return
 
-        # Detalhe de ordem (abertura)
+        # Check if this is detailed order data with requestId
         if "requestId" in data and "asset" in data and "amount" in data:
             request_id = str(data["requestId"])
-            if request_id not in self._active_orders and request_id not in self._order_results:
+
+            # If this is a new order, add it to tracking
+            if (
+                request_id not in self._active_orders
+                and request_id not in self._order_results
+            ):
                 order_result = OrderResult(
                     order_id=request_id,
                     asset=data.get("asset", "UNKNOWN"),
                     amount=float(data.get("amount", 0)),
-                    direction=OrderDirection.CALL if data.get("command", 0) == 0 else OrderDirection.PUT,
+                    direction=OrderDirection.CALL
+                    if data.get("command", 0) == 0
+                    else OrderDirection.PUT,
                     duration=int(data.get("time", 60)),
                     status=OrderStatus.ACTIVE,
                     placed_at=datetime.now(),
-                    expires_at=datetime.now() + timedelta(seconds=int(data.get("time", 60))),
+                    expires_at=datetime.now()
+                    + timedelta(seconds=int(data.get("time", 60))),
                     profit=float(data.get("profit", 0)) if "profit" in data else None,
                     payout=data.get("payout"),
                 )
+
+                # Add to active orders
                 self._active_orders[request_id] = order_result
                 if self.enable_logging:
-                    logger.success(f" Ordem {request_id} adicionada ao rastreamento a partir de dados JSON")
-                # emitir evento fora do bloco de logging
+                    logger.success(
+                        f" Order {request_id} added to tracking from JSON data"
+                    )
+
                 await self._emit_event("order_opened", data)
 
-        # Resultado de ordem (fechamento)
+        # Check if this is order result data with deals
         elif "deals" in data and isinstance(data["deals"], list):
             for deal in data["deals"]:
                 if isinstance(deal, dict) and "id" in deal:
                     order_id = str(deal["id"])
+
                     if order_id in self._active_orders:
                         active_order = self._active_orders[order_id]
                         profit = float(deal.get("profit", 0))
+
+                        # Determine status
                         if profit > 0:
                             status = OrderStatus.WIN
                         elif profit < 0:
                             status = OrderStatus.LOSE
                         else:
-                            # trate zero como empate se sua enum suportar
-                            status = OrderStatus.DRAW if hasattr(OrderStatus, "DRAW") else OrderStatus.LOSE
+                            status = OrderStatus.LOSE  # Default for zero profit
 
                         result = OrderResult(
                             order_id=active_order.order_id,
@@ -1056,15 +1103,18 @@ class AsyncPocketOptionClient:
                             payout=deal.get("payout"),
                         )
 
+                        # Move from active to completed
                         self._order_results[order_id] = result
                         del self._active_orders[order_id]
 
                         if self.enable_logging:
-                            logger.success(f" Ordem {order_id} concluída via dados JSON: {status.value} - Lucro: ${profit:.2f}")
-                        # emitir evento fora do bloco de logging
-                        await self._emit_event("order_closed", result)
+                            logger.success(
+                                f" Order {order_id} completed via JSON data: {status.value} - Profit: ${profit:.2f}"
+                            )
+                            await self._emit_event("order_closed", result)
 
     async def _emit_event(self, event: str, data: Any) -> None:
+        """Emit event to registered callbacks"""
         if event in self._event_callbacks:
             for callback in self._event_callbacks[event]:
                 try:
@@ -1074,16 +1124,18 @@ class AsyncPocketOptionClient:
                         callback(data)
                 except Exception as e:
                     if self.enable_logging:
-                        logger.error(f"Erro no callback de evento para {event}: {e}")
+                        logger.error(f"Error in event callback for {event}: {e}")
 
+    # Event handlers
     async def _on_authenticated(self, data: Dict[str, Any]) -> None:
+        """Handle authentication success"""
         if self.enable_logging:
-            logger.success(" Autenticado com sucesso na PocketOption")
-        # incrementar somente aqui para evitar duplicidade
+            logger.success(" Successfully authenticated with PocketOption")
         self._connection_stats["successful_connections"] += 1
         await self._emit_event("authenticated", data)
 
     async def _on_balance_updated(self, data: Dict[str, Any]) -> None:
+        """Handle balance update"""
         try:
             balance = Balance(
                 balance=float(data.get("balance", 0)),
@@ -1092,35 +1144,49 @@ class AsyncPocketOptionClient:
             )
             self._balance = balance
             if self.enable_logging:
-                logger.info(f"Saldo atualizado: ${balance.balance:.2f}")
+                logger.info(f"Balance updated: ${balance.balance:.2f}")
             await self._emit_event("balance_updated", balance)
         except Exception as e:
             if self.enable_logging:
-                logger.error(f"Falha ao analisar dados de saldo: {e}")
+                logger.error(f"Failed to parse balance data: {e}")
 
     async def _on_balance_data(self, data: Dict[str, Any]) -> None:
+        """Handle balance data message"""
+        # This is similar to balance_updated but for different message format
         await self._on_balance_updated(data)
 
     async def _on_order_opened(self, data: Dict[str, Any]) -> None:
+        """Handle order opened event"""
         if self.enable_logging:
-            logger.info(f"Ordem aberta: {data}")
+            logger.info(f"Order opened: {data}")
         await self._emit_event("order_opened", data)
 
     async def _on_order_closed(self, data: Dict[str, Any]) -> None:
+        """Handle order closed event"""
         if self.enable_logging:
-            logger.info(f"📊 Ordem fechada: {data}")
+            logger.info(f"📊 Order closed: {data}")
         await self._emit_event("order_closed", data)
 
     async def _on_stream_update(self, data: Dict[str, Any]) -> None:
+        """Handle stream update event - includes real-time candle data"""
         if self.enable_logging:
-            logger.debug(f"📡 Atualização de stream: {data}")
-        if "asset" in data and "period" in data and ("candles" in data or "data" in data):
+            logger.debug(f"📡 Stream update: {data}")
+
+        # Check if this is candle data from changeSymbol subscription
+        if (
+            "asset" in data
+            and "period" in data
+            and ("candles" in data or "data" in data)
+        ):
             await self._handle_candles_stream(data)
+
         await self._emit_event("stream_update", data)
 
     async def _on_candles_received(self, data: Dict[str, Any]) -> None:
+        """Handle candles data received"""
         if self.enable_logging:
-            logger.info(f"🕯️ Candles recebidos com dados: {type(data)}")
+            logger.info(f"🕯️ Candles received with data: {type(data)}")
+        # Check if we have pending candle requests
         if hasattr(self, "_candle_requests") and self._candle_requests:
             try:
                 for request_id, future in list(self._candle_requests.items()):
@@ -1129,16 +1195,20 @@ class AsyncPocketOptionClient:
                         if len(parts) >= 2:
                             asset = "_".join(parts[:-1])
                             timeframe = int(parts[-1])
-                            candles = self._parse_candles_data(data.get("candles", []), asset, timeframe)
+                            candles = self._parse_candles_data(
+                                data.get("candles", []), asset, timeframe
+                            )
                             if self.enable_logging:
-                                logger.info(f"🕯️ Analisados {len(candles)} candles da resposta")
+                                logger.info(
+                                    f"🕯️ Parsed {len(candles)} candles from response"
+                                )
                             future.set_result(candles)
                             if self.enable_logging:
-                                logger.debug(f"Solicitação de candles resolvida: {request_id}")
+                                logger.debug(f"Resolved candle request: {request_id}")
                             break
             except Exception as e:
                 if self.enable_logging:
-                    logger.error(f"Erro ao processar dados de candles: {e}")
+                    logger.error(f"Error processing candles data: {e}")
                 for request_id, future in list(self._candle_requests.items()):
                     if not future.done():
                         future.set_result([])
@@ -1146,11 +1216,13 @@ class AsyncPocketOptionClient:
         await self._emit_event("candles_received", data)
 
     async def _on_disconnected(self, data: Dict[str, Any]) -> None:
+        """Handle disconnection event"""
         if self.enable_logging:
-            logger.warning("Desconectado da PocketOption")
+            logger.warning("Disconnected from PocketOption")
         await self._emit_event("disconnected", data)
 
     async def _handle_candles_stream(self, data: Dict[str, Any]) -> None:
+        """Handle candle data from stream updates (changeSymbol responses)"""
         try:
             asset = data.get("asset")
             period = data.get("period")
@@ -1158,21 +1230,29 @@ class AsyncPocketOptionClient:
                 return
             request_id = f"{asset}_{period}"
             if self.enable_logging:
-                logger.info(f"🕯️ Processando stream de candles para {asset} ({period}s)")
-            if hasattr(self, "_candle_requests") and request_id in self._candle_requests:
+                logger.info(f"🕯️ Processing candle stream for {asset} ({period}s)")
+            if (
+                hasattr(self, "_candle_requests")
+                and request_id in self._candle_requests
+            ):
                 future = self._candle_requests[request_id]
                 if not future.done():
                     candles = self._parse_stream_candles(data, asset, period)
                     if candles:
                         future.set_result(candles)
                         if self.enable_logging:
-                            logger.info(f"🕯️ Solicitação de candles resolvida para {asset} com {len(candles)} candles")
+                            logger.info(
+                                f"🕯️ Resolved candle request for {asset} with {len(candles)} candles"
+                            )
                 del self._candle_requests[request_id]
         except Exception as e:
             if self.enable_logging:
-                logger.error(f"Erro ao gerenciar stream de candles: {e}")
+                logger.error(f"Error handling candles stream: {e}")
 
-    def _parse_stream_candles(self, stream_data: Dict[str, Any], asset: str, timeframe: int):
+    def _parse_stream_candles(
+        self, stream_data: Dict[str, Any], asset: str, timeframe: int
+    ):
+        """Parse candles from stream update data (changeSymbol response)"""
         candles = []
         try:
             candle_data = stream_data.get("data") or stream_data.get("candles") or []
@@ -1205,12 +1285,17 @@ class AsyncPocketOptionClient:
             candles.sort(key=lambda x: x.timestamp)
         except Exception as e:
             if self.enable_logging:
-                logger.error(f"Erro ao analisar candles de stream: {e}")
+                logger.error(f"Error parsing stream candles: {e}")
         return candles
 
     async def _on_keep_alive_connected(self):
-        logger.info("Conexão keep-alive estabelecida")
+        """Handle event when keep-alive connection is established"""
+        logger.info("Keep-alive connection established")
+
+        # Initialize data after connection
         await self._initialize_data()
+
+        # Emit event
         for callback in self._event_callbacks.get("connected", []):
             try:
                 if asyncio.iscoroutinefunction(callback):
@@ -1218,11 +1303,16 @@ class AsyncPocketOptionClient:
                 else:
                     callback()
             except Exception as e:
-                logger.error(f"Erro no callback de conectado: {e}")
+                logger.error(f"Error in connected callback: {e}")
 
     async def _on_keep_alive_reconnected(self):
-        logger.info("Conexão keep-alive restabelecida")
+        """Handle event when keep-alive connection is re-established"""
+        logger.info("Keep-alive connection re-established")
+
+        # Re-initialize data
         await self._initialize_data()
+
+        # Emit event
         for callback in self._event_callbacks.get("reconnected", []):
             try:
                 if asyncio.iscoroutinefunction(callback):
@@ -1230,16 +1320,22 @@ class AsyncPocketOptionClient:
                 else:
                     callback()
             except Exception as e:
-                logger.error(f"Erro no callback de reconectado: {e}")
+                logger.error(f"Error in reconnected callback: {e}")
 
     async def _on_keep_alive_message(self, message):
+        """Handle messages received via keep-alive connection"""
+        # Process the message
         if message.startswith("42"):
             try:
+                # Parse the message (remove the 42 prefix and parse JSON)
                 data_str = message[2:]
                 data = json.loads(data_str)
+
                 if isinstance(data, list) and len(data) >= 2:
                     event_type = data[0]
                     event_data = data[1]
+
+                    # Process different event types
                     if event_type == "authenticated":
                         await self._on_authenticated(event_data)
                     elif event_type == "balance_data":
@@ -1253,8 +1349,9 @@ class AsyncPocketOptionClient:
                     elif event_type == "stream_update":
                         await self._on_stream_update(event_data)
             except Exception as e:
-                logger.error(f"Erro ao processar mensagem keep-alive: {e}")
+                logger.error(f"Error processing keep-alive message: {e}")
 
+        # Emit raw message event
         for callback in self._event_callbacks.get("message", []):
             try:
                 if asyncio.iscoroutinefunction(callback):
@@ -1262,38 +1359,52 @@ class AsyncPocketOptionClient:
                 else:
                     callback(message)
             except Exception as e:
-                logger.error(f"Erro no callback de mensagem: {e}")
+                logger.error(f"Error in message callback: {e}")
 
-    async def _attempt_reconnection(self, max_attempts: int = 3) -> tuple[bool, str]:
+    async def _attempt_reconnection(self, max_attempts: int = 3) -> bool:
         """
-        Tentar reconectar à PocketOption.
-        Retorna (ok, msg).
+        Attempt to reconnect to PocketOption
+
+        Args:
+            max_attempts: Maximum number of reconnection attempts
+
+        Returns:
+            bool: True if reconnection was successful
         """
-        logger.info(f"Tentando reconexão (máximo de {max_attempts} tentativas)...")
+        logger.info(f"Attempting reconnection (max {max_attempts} attempts)...")
+
         for attempt in range(max_attempts):
             try:
-                logger.info(f"Tentativa de reconexão {attempt + 1}/{max_attempts}")
+                logger.info(f"Reconnection attempt {attempt + 1}/{max_attempts}")
+
+                # Disconnect first to clean up
                 if self._is_persistent and self._keep_alive_manager:
                     await self._keep_alive_manager.disconnect()
                 else:
                     await self._websocket.disconnect()
 
-                await asyncio.sleep(2 + attempt)  # Atraso progressivo
+                # Wait a bit before reconnecting
+                await asyncio.sleep(2 + attempt)  # Progressive delay
 
+                # Attempt to reconnect
                 if self.persistent_connection:
-                    ok, msg = await self._start_persistent_connection()
+                    success = await self._start_persistent_connection()
                 else:
-                    ok, msg = await self._start_regular_connection()
+                    success = await self._start_regular_connection()
 
-                if ok:
-                    logger.info(f" Reconexão bem sucedida na tentativa {attempt + 1}")
+                if success:
+                    logger.info(f" Reconnection successful on attempt {attempt + 1}")
+
+                    # Trigger reconnected event
                     await self._emit_event("reconnected", {})
-                    return True, "Conexão bem sucedida"
+                    return True
                 else:
-                    logger.warning(f"Tentativa de reconexão {attempt + 1} falhou: {msg}")
+                    logger.warning(f"Reconnection attempt {attempt + 1} failed")
 
             except Exception as e:
-                logger.error(f"Tentativa de reconexão {attempt + 1} falhou com erro: {e}")
+                logger.error(
+                    f"Reconnection attempt {attempt + 1} failed with error: {e}"
+                )
 
-        logger.error(f"Todas as {max_attempts} tentativas de reconexão falharam")
-        return False, "Falha ao conectar"
+        logger.error(f"All {max_attempts} reconnection attempts failed")
+        return False

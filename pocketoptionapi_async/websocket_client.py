@@ -19,40 +19,6 @@ from websockets.exceptions import ConnectionClosed
 from websockets.legacy.client import WebSocketClientProtocol
 from loguru import logger
 
-def _normalize_headers_for_websockets(headers):
-    """
-    Convert headers dict to list of (key, value) tuples to avoid compatibility issues
-    with older/newer versions of `websockets` that are strict about types.
-    """
-    if headers is None:
-        return None
-    if isinstance(headers, dict):
-        return list(headers.items())
-    if isinstance(headers, (list, tuple)):
-        return list(headers)
-    try:
-        return list(headers.items())
-    except Exception:
-        return None
-
-def _get_websockets_connect():
-    """
-    Return a reference to the correct connect function regardless of where it lives
-    across `websockets` versions.
-    """
-    try:
-        import websockets as _ws
-        # Newer versions expose connect at top-level; some have it under .client
-        if hasattr(_ws, "connect"):
-            return _ws.connect
-        if hasattr(_ws, "client") and hasattr(_ws.client, "connect"):
-            return _ws.client.connect
-        # Legacy path (very old)
-        from websockets.legacy.client import connect as legacy_connect  # type: ignore
-        return legacy_connect
-    except Exception as e:
-        raise RuntimeError(f"Falha ao localizar websockets.connect: {e}")
-
 from .models import ConnectionInfo, ConnectionStatus, ServerTime
 from .constants import CONNECTION_SETTINGS, DEFAULT_HEADERS
 from .exceptions import WebSocketError, ConnectionError
@@ -207,10 +173,10 @@ class AsyncWebSocketClient:
 
                 # Conectar com timeout
                 ws = await asyncio.wait_for(
-                    (_get_websockets_connect())(
+                    websockets.connect(
                         url,
                         ssl=ssl_context,
-                        extra_headers=_normalize_headers_for_websockets(DEFAULT_HEADERS),
+                        extra_headers=DEFAULT_HEADERS,
                         ping_interval=CONNECTION_SETTINGS["ping_interval"],
                         ping_timeout=CONNECTION_SETTINGS["ping_timeout"],
                         close_timeout=CONNECTION_SETTINGS["close_timeout"],

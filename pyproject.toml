@@ -57,7 +57,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["pocketoptionapi"]
+packages = ["pocketoptionapi_async"]
 
 [project.urls]
 Homepage = "https://github.com/ByMyselfJhones/PocketOptionAPI"
