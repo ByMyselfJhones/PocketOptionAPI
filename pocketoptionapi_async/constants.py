@@ -7,7 +7,7 @@
 # - Configura limites da API e cabeçalhos padrão
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 import random
 
 # Mapeamento de ativos com seus respectivos IDs
