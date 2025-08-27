@@ -52,7 +52,7 @@ dependencies = [
     "urllib3>=2.5.0",
     "webdriver-manager>=4.0.0",
     "websocket-client>=1.8.0",
-    "websockets>=15.0.1",
+    "websockets==11.0.3",
     "wheel>=0.45.1",
 ]
 
